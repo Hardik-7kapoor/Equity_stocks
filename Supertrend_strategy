@@ -1,0 +1,923 @@
+from __future__ import annotations
+import sys, time,pause, json, signal, struct, pymongo, requests, websocket, threading, multiprocessing, warnings
+import numpy as np, pandas as pd
+from os import getpid, kill
+from datetime import datetime, time as dt_time, timedelta , date
+import logging
+from pymongo import MongoClient
+import pandas as pd
+from datetime import datetime, timedelta
+
+warnings.filterwarnings("ignore")
+# Configure logging
+
+logging.basicConfig(
+    filename=f'st_42.log',           # Log file name
+    level=logging.INFO,           # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+def find_token(company):
+    zerotha_eq_df = pd.read_csv(r"/media/indian_live/New Volume/hardik/zerotha_token.csv")
+    try:
+        filt_1 = zerotha_eq_df[zerotha_eq_df['tradingsymbol'] == company].iloc[0]
+        return filt_1['exchange_token']
+    except:
+        logging.info("Stocks Token error",company)
+
+def hist_db (stock_today):
+    Stocks_list=stock_today
+    client  = MongoClient("mongodb+srv://hardikkapoor872:9mx_xEuCHLit7GH@testdb.d6hd6pq.mongodb.net/?retryWrites=true&w=majority&appName=TestDB")
+    db = client['Historical_DB']
+    fetch_start = datetime.now()
+    logging.info(f"Start Time :,{ fetch_start}")
+
+    for stock in Stocks_list:
+
+        logging.info(f"\n========== Fetching: {stock} ========== {datetime.now()}")
+        if stock == "IDEA":
+            continue
+        token = find_token(stock)
+        end_date = fetch_start.replace(microsecond=0, second=0)
+
+        his_data = Candle_Fetcher2(
+            token=token,
+            start_date=end_date - timedelta(days=10),
+            end_date=end_date
+        )
+
+        # Convert to DataFrame  
+        column_names = ['TIME', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME']
+        df = pd.DataFrame(his_data, columns=column_names)
+        if df.empty:
+            logging.info("No his data ")
+            continue
+        df['TIME'] = pd.to_datetime(df['TIME']).dt.tz_localize(None)
+
+        # Convert to daily candles
+        records =  df.to_dict("records")
+        collection = db[stock]
+        collection.delete_many({})
+        
+        collection.insert_many(records)
+    
+
+
+        fetch_end = datetime.now()
+        logging.info(f"\nEnd Time   :, {fetch_end}")
+        logging.info(f"Time Taken :, {fetch_end - fetch_start}")
+
+def todays_stock ():
+    client = MongoClient("mongodb+srv://sk9234675221:saurav$equity@equity.cabacxh.mongodb.net/?retryWrites=true&w=majority&appName=Equity")
+    db = client["stock_news_db"]
+    collection = db["stocks_list"]
+
+    seven_days_ago = (datetime.now()).date()
+
+    query = {
+        "date": {"$gte": seven_days_ago.strftime("%Y-%m-%d")}
+    }
+
+    data = list(collection.find(query))
+
+    df = pd.DataFrame(data)
+
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["date"])
+        logging.info(df[["company", "date"]].head())
+        logging.info(f"\n Total rows fetched (last 30 days): {len(df)}")
+    else:
+        logging.info(" No stocks found in the last 30 days.")
+    today = datetime.now().strftime("%Y-%m-%d")  # get today's date in the same format
+    dff = df[df['date'] == today]               # filter only today's rows
+
+    # get company list for today
+    stock_list = dff['company'].tolist()
+
+    # logging.info(stock_list)
+    # logging.info(dff)
+    return stock_list
+
+def Candle_Fetcher2(token, start_date, end_date):
+    n = 0
+    while True:
+        try:
+            old = "https://masterswift.mastertrust.co.in/api/v1/charts/tdv"
+            params = {
+                'exchange': 'NSE',
+                'token': token,
+                'starttime': int(start_date.timestamp()),
+                'endtime': int(end_date.timestamp()),
+                'candletype': '1',
+                'data_duration': '1',
+            }
+            n += 1
+            response = requests.request(method='GET', url=old, params=params)
+            data = response.json()['data']['candles']
+            if data:
+                return data
+        except:
+            time.sleep(0.5)
+            if n == 3:
+                break
+            continue
+
+def candle_conversion(df, timeframe):
+    df_lst = []
+    apply_format = {
+        "OPEN": "first",
+        "HIGH": "max",
+        "LOW": "min",
+        "CLOSE": "last",
+        "VOLUME": "sum",
+    }
+    # Ensure TIME is datetime
+    df['TIME'] = pd.to_datetime(df['TIME'])
+    
+    for _, smdf in df.groupby(df['TIME'].dt.date):
+        smdf = smdf.resample(timeframe, on="TIME", origin='start_day', offset="9Hr15min").apply(apply_format)
+        df_lst.append(smdf)
+    
+    if len(df_lst) == 0:
+        return pd.DataFrame()
+        
+    return pd.concat(df_lst).reset_index()
+
+def time_checker():
+    return str(datetime.now().replace(second=0, microsecond=0).time())
+
+from pymongo import MongoClient
+import pandas as pd
+from datetime import datetime, timedelta
+
+def fetch_historical_from_db(stock_name, token, days=5):
+
+    # logging.info(f"Fetching DB Data: {stock_name} | Token: {token}")
+
+    token = str(token)
+
+    # --- DB1: Historical (name based) ---
+    client1 = MongoClient("")
+    db1 = client1["Historical_DB_2"]
+    collection_hist = db1[stock_name]
+
+    # --- DB2: Live (token based) ---
+    client2 = MongoClient("mongodb:")
+    db2 = client2["Stocks_1MIN"]
+    collection_today = db2[token]
+
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days)
+    today = datetime.now().date()
+
+    # ========== HISTORICAL ==========
+    df_hist = pd.DataFrame(
+        list(collection_hist.find({
+            "date": {"$gte": start_date, "$lte": end_date}
+        }).sort("date", 1))
+    )
+    df_hist = df_hist.rename(columns={
+            'date':'TIME',
+            "open": "OPEN",
+            "high": "HIGH",
+            "low": "LOW",
+            "close": "CLOSE",
+            "volume": "VOLUME"
+        })
+    
+    df_hist = df_hist[["TIME","OPEN","HIGH","LOW","CLOSE","VOLUME"]]
+    # ========== TODAY LIVE ==========
+    df_live = pd.DataFrame(
+        list(collection_today.find({
+            "date": {
+                "$gte": datetime(today.year, today.month, today.day, 9, 15),
+                "$lte": end_date
+            }
+        }).sort("date", 1))
+    )
+
+    if not df_live.empty:
+        df_live.drop(columns=["_id"], errors="ignore", inplace=True)
+        df_live["date"] = pd.to_datetime(df_live["date"])
+        if "volume" in df_live.columns:
+            df_live["VOLUME"] = df_live["volume"]
+        else:
+            df_live["volume"] = np.nan
+
+        # Make live data match historical format
+        df_live = df_live.rename(columns={
+            'date':'TIME',
+            "open": "OPEN",
+            "high": "HIGH",
+            "low": "LOW",
+            "close": "CLOSE",
+            "volume": "VOLUME"
+        })
+
+        df_live = df_live[["TIME","OPEN","HIGH","LOW","CLOSE","VOLUME"]]
+
+    # ========== MERGE ==========
+    if df_hist.empty and df_live.empty:
+        return pd.DataFrame()
+
+    df_final = pd.concat([df_hist, df_live], ignore_index=True)
+
+    df_final = df_final.dropna(subset=["TIME"])
+    df_final = df_final.sort_values("TIME").reset_index(drop=True)
+    df_final = df_final.drop(columns=['_id'],errors='ignore')
+    df_final = df_final.drop_duplicates(subset=["TIME"], keep="last")
+
+    return df_final
+
+def SuperTrend(data, atrperiod, factor):
+    y = data.copy(deep=True)
+    y['high'] = y['HIGH']
+    y['low'] = y['LOW']
+    y['close'] = y['CLOSE']
+    
+    hl = pd.Series(y["high"] - y["low"]).abs()
+    hc = pd.Series(y["high"] - y["close"].shift()).abs()
+    cl = pd.Series(y["close"].shift() - y["low"]).abs()
+    hcl = pd.concat([hl, hc, cl], axis=1)
+    tr = hcl.max(axis=1)
+    y['hl2'] = (y['high'] + y['low']) / 2
+    y['atr'] = tr.ewm(alpha=1/atrperiod, min_periods=atrperiod).mean().round(7).fillna(0)
+    y['UB'] = y['hl2'] + factor * y['atr']
+    y['LB'] = y['hl2'] - factor * y['atr']
+    y['direction'] = 0
+    y['supertrend']=0.0
+
+
+    np_dtype = np.dtype({'names':y.dtypes.keys(),'formats':y.dtypes.values})
+    x = np.ones(len(y),dtype= np_dtype)
+    for i in y.dtypes.keys():
+        x[i] = y[i].to_numpy()
+    prevsupertrend=x['UB'][0]
+    prevlowerband=x['LB'][0]
+    prevupperband=x['UB'][0]
+    for i in range(1,len(x)):
+        if x['LB'][i]>prevlowerband or x['close'][i-1]<prevlowerband:
+            pass
+        else:
+            x['LB'][i]=prevlowerband
+        if x['UB'][i]<prevupperband or x['close'][i-1]>prevupperband:
+            pass
+        else:
+            x['UB'][i]=prevupperband
+        if x['atr'][i-1]==0:
+            x['direction'][i]=1
+        elif prevsupertrend==prevupperband:
+            if x['close'][i]>x['UB'][i]:
+                x['direction'][i]=-1
+            else:
+                x['direction'][i]=1
+        else:
+            if x['close'][i]<x['LB'][i]:
+                x['direction'][i]=1
+            else:
+                x['direction'][i]=-1
+        if x['direction'][i]==-1:
+            prevsupertrend=x['LB'][i]
+        else:
+            prevsupertrend=x['UB'][i]
+        prevlowerband=x['LB'][i]
+        prevupperband=x['UB'][i]
+
+    return x['direction'], x["UB"], x["LB"]
+
+def bb(df_5min, n, k):
+    df_5min['Middle'] = df_5min['CLOSE'].rolling(window=n).mean().round(2)
+    df_5min['StdDev'] = df_5min['CLOSE'].rolling(window=n).std(ddof=0)
+    df_5min['Upper']  = (df_5min['Middle'] + k * df_5min['StdDev']).round(2)
+    df_5min['Lower']  = (df_5min['Middle'] - k * df_5min['StdDev']).round(2)
+    return df_5min
+
+def fetching_positions():
+    today_date = str(datetime.now().date())
+    fetched_positions = positions_collec_new.find_one({'date': today_date}, sort=[( '_id', pymongo.DESCENDING )])
+    if not fetched_positions:
+        return None, None
+    return fetched_positions, fetched_positions["_id"]
+
+def start_positions(imgLink, buy_st, sell_st):
+    todays_date = str(datetime.now().date())
+    fetch_positions = positions_collec.find_one({'date': todays_date}, sort=[( '_id', pymongo.DESCENDING )])
+    
+    _id = str(time.perf_counter_ns())
+    
+    if fetch_positions:
+        base_buy = fetch_positions.get('BuyStocks', {})
+        base_sell = fetch_positions.get('SellStocks', {})
+        img = fetch_positions.get('imgLink', [])
+    else:
+        base_buy = buy_st
+        base_sell = sell_st
+        img = imgLink
+
+    def_data = {
+        "_id": _id,
+        "date": todays_date,
+        "Buy_pos_4": 0,
+        "Sell_pos_4": 0,
+        "imgLink": img,
+        "BuyStocks": base_buy,
+        "SellStocks": base_sell,
+        "setup_dct": {},
+        "BuyTrades_4": {},
+        "SellTrades_4": {},
+    }
+    positions_collec_new.insert_one(def_data)
+    
+    fetched_positions = positions_collec_new.find_one({'date': todays_date}, sort=[( '_id', pymongo.DESCENDING )])
+    return fetched_positions, fetched_positions["_id"]
+
+def positions_updater(data_to_update, ID):
+    return positions_collec_new.update_one({"_id": ID}, {"$set": data_to_update})
+
+def update_stock_setup_fields(doc_id, stock_symbol, updates_dict):
+    update_query = {
+        f"setup_dct.{stock_symbol}.{field}": value
+        for field, value in updates_dict.items()
+    }
+    positions_collec_new.update_one({"_id": doc_id}, {"$set": update_query})
+
+def trade_setup():
+    logging.info(len(positions['setup_dct']))
+    buy_stocks = positions['BuyStocks']
+    sell_stocks = positions['SellStocks']
+    all_stocks = {**buy_stocks, **sell_stocks}
+    for stock_token, stock_name in all_stocks.items():
+        if stock_name not in dict_stocks_today:
+            dict_stocks_today[stock_name] = {
+                'token': stock_token,
+                'cnf': 0,
+                'cnf_PRICE': 0.0,
+                'entry': False,
+                'looking_for': "BOTH",
+                'trigger_idx_time': None
+            }
+    logging.info(f"Setup Complete. Tracking {len(dict_stocks_today)} stocks.")
+
+def trade_signal_cnf():
+
+    end_check = dt_time(14, 30)
+    
+    logging.info("1")
+    
+    while time_checker() >= "09:30:00":
+    
+        time.sleep(2)
+        logging.info('--------------------OUT OF LOOP---------------------------------')
+        positions_curr, _ = fetching_positions()
+    
+        start_time  =  datetime.now()
+        logging.info(start_time)
+    
+        for stock_name, values in dict_stocks_today.items():
+            if stock_name in ["IDEA","BANKINDIA"]:
+                continue
+            current_time_obj = datetime.now().time()
+            
+            logging.info(f"Findin in  {stock_name}")
+            # --- Check Time & Existing Trades ---
+            
+            if current_time_obj > end_check:
+                continue
+            
+            if values['entry'] or values['cnf'] >= 2:
+                continue
+
+            # ===== NEW CHECK: Prevent re-entry if already traded today (DB) =====
+    
+            try:
+    
+                all_buy = positions_curr.get("BuyTrades_4", {}) if positions_curr else {}
+                all_sell = positions_curr.get("SellTrades_4", {}) if positions_curr else {}
+                already_traded = False
+                
+                for tr in list(all_buy.values()) + list(all_sell.values()):
+                    # if symbol present in existing trades -> mark and break
+                    
+                    if tr.get('symbol') == stock_name:
+                        logging.info(f"SKIPPING {stock_name} → Already traded today (DB check).")
+                        values['entry'] = True
+                        values['cnf'] = 2
+                        already_traded = True
+                        break
+                
+                if already_traded:
+                    continue
+            
+            except Exception as e:
+                logging.info(f"Error while checking already_traded for {stock_name}: {e}")
+
+            # ===== NEW CHECK: Max 4 trades per day (hard cap) =====
+            try:
+                buy_count = int(positions_curr.get("Buy_pos_4", 0)) if positions_curr else 0
+                sell_count = int(positions_curr.get("Sell_pos_4", 0)) if positions_curr else 0
+                total_trades_today = buy_count + sell_count
+                
+                if total_trades_today >= 29:
+                    logging.info(f"MAX LIMIT HIT: {total_trades_today} trades placed → No new trades allowed.")
+                    # Mark this stock as non-tradeable for the day in memory as well
+                    values['entry'] = True
+                    values['cnf'] = 2
+                    continue
+            except Exception as e:
+                logging.info(f"Error while checking trade cap: {e}")
+
+            # --- Fetch Data ---
+            stock_token = values['token']
+            end_date = datetime.now().replace(microsecond=0, second=0)
+            start_fetch = end_date - timedelta(days=5)
+
+            try:
+                his_data = fetch_historical_from_db(stock_name,stock_token,5)
+                last_cand = his_data.iloc[-1]
+                tick = last_cand['CLOSE']
+
+                if tick < 55 or tick > 5000:
+                    continue
+                # logging.info(his_data.tail(1))
+                if his_data.empty:
+                    logging.info("No Data ")
+                    continue
+
+                df = pd.DataFrame(his_data, columns=['TIME', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME'])
+                df['TIME'] = pd.to_datetime(df['TIME']).dt.tz_localize(None)
+
+                df_5min = candle_conversion(df, '5min')
+                if df_5min.empty or len(df_5min) < 20: continue
+
+                # --- Indicators ---
+                bb(df_5min, n=15, k=2)
+                direction, ub, lb = SuperTrend(df_5min, 5, 3)
+
+                df_5min['Dir'] = direction
+                df_5min['SU'] = ub
+                df_5min['SL'] = lb
+
+                today_date = datetime.now().date()
+                df_today_candles = df_5min[df_5min['TIME'].dt.date == today_date]
+                if df_today_candles.empty:
+                    continue
+
+                # Get the latest completed candle
+                now =  datetime.now()
+                df_today_candles['candle_close'] = df_today_candles['TIME'] + timedelta(minutes=5)
+                df_completed = df_today_candles[df_today_candles['candle_close']<=now]
+                
+                if df_completed.empty:
+                    continue
+                
+                curr  = df_completed.iloc[-1]
+                prev = df_completed.iloc[-2]
+                live = his_data.iloc[-1]
+                                
+                # curr  = df_today_candles.iloc[-1]
+                # prev = df_today_candles.iloc[-2]
+                # live = his_data.iloc[-1]
+
+                
+                if values['cnf'] == 0:
+                   
+                    # SELL SIGNAL
+                
+                    if (prev["CLOSE"] > prev["Lower"] and curr["CLOSE"] < curr["Lower"] ):
+                
+                        entry_price = curr['LOW'] - 0.05
+                
+                        logging.info(f"SELL BREACH (Local): {stock_name} @ {entry_price} @ {curr['TIME']}")
+                        values.update({'cnf': 1, 'looking_for': "SELL", 'cnf_PRICE': entry_price, 'trigger_idx_time': curr['TIME']})
+                
+                        logging.info(values)
+                    # BUY SIGNAL
+                
+                    elif (prev['Upper'] > prev['CLOSE']  and curr["CLOSE"] > curr["Upper"] ):
+                        entry_price = curr['HIGH'] + 0.05
+                
+                        logging.info(f"BUY BREACH (Local): {stock_name} @ {entry_price }@ {curr['TIME']}")
+                
+                        values.update({'cnf': 1, 'looking_for': "BUY", 'cnf_PRICE': entry_price, 'trigger_idx_time': curr['TIME']})
+                
+                        logging.info(values)
+
+                elif values['cnf'] == 1:
+                    # 1. Expiration Check
+                
+                    time_diff = (datetime.now() - pd.to_datetime(values['trigger_idx_time'])).total_seconds() / 60
+                    if time_diff > 15:
+                
+                        logging.info(f"Signal Expired: {stock_name}")
+                        values.update({'cnf': 0, 'looking_for': "BOTH"})
+                
+                        continue
+
+                    # 2. Check Execution
+                    trigger_price = values['cnf_PRICE']
+                    trade_side = None
+
+                    # Check Breakdown (SELL)
+                
+                    if values['looking_for'] == "SELL" and live['LOW'] <= trigger_price:
+                        logging.info("Sell Entry Found ")
+                
+                        trade_side = "SELL"
+                
+                        sl_val = trigger_price * 1.01
+                        tg_val = trigger_price * 0.985
+                        collection_key = "SellTrades_4"
+                        pos_key = "Sell_pos_4"
+
+                    # Check Breakout (BUY)
+                    elif values['looking_for'] == "BUY" and live['HIGH'] >= trigger_price:
+                
+                        logging.info("Buy Entry Found ")
+                        trade_side = "BUY"
+                        sl_val = trigger_price * 0.99
+                
+                        tg_val = trigger_price * 1.015
+                        collection_key = "BuyTrades_4"
+                        pos_key = "Buy_pos_4"
+
+                    # 3. IF TRIGGERED -> DIRECT DB UPDATE
+                    if trade_side:
+                        logging.info(f"EXECUTING {trade_side}: {stock_name}")
+
+                        # Final safety re-check of daily cap right before placing trade (race condition protection)
+                        positions_curr_ref, _ = fetching_positions()
+                
+                        buy_count = int(positions_curr_ref.get("Buy_pos_4", 0)) if positions_curr_ref else 0
+                        sell_count = int(positions_curr_ref.get("Sell_pos_4", 0)) if positions_curr_ref else 0
+                
+                        if buy_count + sell_count >= 29:
+                            logging.info("RACE-CHECK: MAX 4 TRADES ALREADY HIT, aborting execution.")
+                            values['entry'] = True
+                            values['cnf'] = 2
+                            continue
+
+                        # Calculate Qty
+                        try: qty = int(PER_TRADE_AMOUNT // trigger_price)
+                        except: qty = 1
+                        if qty == 0: qty = 1
+                        sl_id = str(time.perf_counter_ns())
+                        odate = datetime.now()
+
+                        # Get current index for this specific list (Buy_pos_4 or Sell_pos_4)
+                        curr_count = positions_curr.get(pos_key, 0) if positions_curr else 0
+
+                        entry_time = live['TIME']
+                        trade_data = {
+                            "cs_id": str(time.perf_counter_ns()),
+                            "sl_id": str(time.perf_counter_ns()),
+                            "symbol": stock_name,
+                            "token": stock_token,
+                            "price": trigger_price,
+                            "Qty": qty,
+                            "side": trade_side,
+                            "condition": "executed",
+                            "entry_time_code":live['TIME'],
+                            "order_time": datetime.now(),
+                            "order_date": str(datetime.now().date()),
+                            "sl": round(sl_val, 2),
+                            "tg": round(tg_val, 2),
+                            "trail": 0,"st_trail":np.nan, "exit_id": 0, "exit_price": 0, "exit_time": 0, "exit_type": 0
+                        }
+
+                        # --- ATOMIC DB UPDATE ---
+                        key_idx = str(curr_count)
+                        time.sleep(4)
+                        positions_collec_new.update_one(
+                            {"_id": ID},
+                            {
+                                "$set": {
+                                    f"{collection_key}.{key_idx}": trade_data,
+                                    pos_key: int(curr_count) + 1
+                                }
+                            }
+                        )
+                        time.sleep(5)
+                        today_iso = datetime.today().strftime('%Y-%m-%d')
+                        logging.info(f"{stock_name},HIIIIIIIIIIIII")
+                        stocks_collection.update_one(
+                            {'date': str(today_iso), 'company': stock_name},
+                            {'$set': {'Decision2':trade_side,'entry_price2':str(values.get('cnf_PRICE')),'cnf_candle2':values.get('trigger_idx_time'),'units2':(5000//values['cnf_PRICE']),'entry_time2':entry_time} }
+							)
+                        logging.info(f"{stock_name},BUYYYYYYYYYYYYYYYY")
+                        
+                        logging.info(f"Trade Saved to Mongo: {stock_name}")
+                        logging.info("======================================")
+                        logging.info("-------------Entry Found ------------")
+                        logging.info("======================================")
+
+                        # Update Local State
+                        values['entry'] = True
+                        values['cnf'] = 2
+                        time.sleep(5)
+            except Exception as e:
+                logging.info(f"Error {stock_name}: {e}")
+                continue
+        end_time =  datetime.now()
+        logging.info(end_time)
+
+def sell_st4_exit(stocks_collection, dict_stocks_today): 
+    exit_time_timelapse = datetime.now().replace(microsecond=0, second=0, minute=0, hour=15)
+    while datetime.now() < exit_time_timelapse + timedelta(minutes=15):
+        time.sleep(10)
+        positions4, ID4 = fetching_positions()
+        if not positions4: continue
+        curr_sell = positions4.get('SellTrades_4', {})
+        for key, trade in curr_sell.items():
+            if trade.get('exit_id') != 0:continue
+            try:
+                stock_name = trade['symbol']
+                token = str(trade['token'])
+                target = trade['tg']
+                stoploss = trade['sl']
+                entry_time = trade['entry_time_code']
+                trade_side = trade['side']
+                end_date = datetime.now().replace(microsecond=0, second=0)
+                his_data = fetch_historical_from_db(stock_name,token, 5)
+                if his_data.empty :
+                    his_data = Candle_Fetcher2(token=token, start_date=end_date - timedelta(days=1), end_date=end_date)
+
+                if his_data.empty:
+                    continue
+
+                df = pd.DataFrame(his_data, columns=['TIME', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME'])
+                df['TIME'] = pd.to_datetime(df['TIME']).dt.tz_localize(None)
+
+                df_5min = candle_conversion(df, '5min')
+                
+                bb(df_5min, n=15, k=2)
+                
+                direction, ub, lb = SuperTrend(df_5min, 10, 3)
+
+                df_5min['Dir'] = direction
+                df_5min['SU'] = ub
+                df_5min['SL'] = lb
+
+                today_date = datetime.now().date()
+                df= df_5min[df_5min['TIME'].dt.date == today_date]
+                if df.empty:
+                    continue
+
+               
+                curr_candel = df_5min.iloc[-2]
+                time.sleep(2)
+                logging.info(f" {stock_name} curr candle {curr_candel} ")
+                prev_trail = trade['st_trail']
+                st_trail = prev_trail  # default → keep previous
+                if curr_candel['Dir'] == 1:
+                    new_trail = curr_candel['SU']
+                    logging.info(f"new trail ; {new_trail}")
+                    if not np.isnan(prev_trail):
+                        st_trail = min(prev_trail, new_trail)
+                    else :
+                        st_trail = new_trail
+                    positions_collec_new.update_one(
+                        {"_id": ID4},
+                        {"$set": {
+                            f"SellTrades_4.{key}.st_trail":float(st_trail),
+                            }}
+                    )
+                df_live = his_data[his_data['TIME'] > entry_time]
+                
+                if df_live.empty:
+                    continue
+                
+                last_row = df_live.iloc[-1]
+                logging.info("=======================================================================")
+                logging.info(f" Here in sell exit n {last_row} ")
+                curr_time = datetime.now().time()
+                
+                exit_reason = None
+                exit_price = 0
+                
+                if curr_time >= dt_time(15, 0):
+                    exit_reason = "TIMELAPSE"
+                    exit_price = last_row['CLOSE']
+                
+                elif last_row['HIGH'] >= stoploss:
+                    exit_reason = "SL Hit"
+                    exit_price = stoploss
+                
+                elif last_row['LOW'] <= target:
+                    exit_reason = "TARGET"
+                    exit_price = target
+
+                elif last_row['HIGH'] >= st_trail:
+                    exit_reason = "SL Trail"
+                    exit_price = st_trail
+                
+                logging.info(f" {stock_name} ST ; {st_trail} {curr_candel['TIME']}")
+                
+                if exit_reason:
+                    logging.info(f"EXITING SELL {stock_name}: {exit_reason} @ {exit_price}")
+                    logging.info("=============================================")
+                    logging.info("------------EXIT  FOUNd ----------------------")
+                    logging.info("=============================================")
+                    exit_time = curr_candel['TIME']
+
+                    positions_collec_new.update_one(
+                        {"_id": ID4},
+                        {"$set": {
+                            f"SellTrades_4.{key}.exit_id": str(time.perf_counter_ns()),
+                            f"SellTrades_4.{key}.exit_price": float(exit_price),
+                            f"SellTrades_4.{key}.exit_time_code": last_row['TIME'],
+                            f"SellTrades_4.{key}.exit_time": datetime.now(),
+                            f"SellTrades_4.{key}.exit_type": exit_reason,
+                        }}
+                    )
+                    time.sleep(2)
+                    today_iso = datetime.today().strftime('%Y-%m-%d')
+                    stocks_collection.update_one(
+                            {'date':str(today_iso), 'company': stock_name},
+                            {'$set': {'Decision2':trade_side,'exit_time2':str(last_row['TIME']),"exit_type2":exit_reason ,'exit_price2':str(exit_price), }}
+                            )
+                    time.sleep(2)
+
+            except Exception as e:
+                logging.info(f"Error in Sell Exit {trade['symbol']}: {e}")
+
+def buy_st4_exit(stocks_collection, dict_stocks_today):
+    exit_time_timelapse = datetime.now().replace(microsecond=0, second=0, minute=0, hour=15)
+    while datetime.now() < exit_time_timelapse + timedelta(minutes=15):
+        time.sleep(2)
+        positions4, ID4 = fetching_positions()
+        if not positions4: continue
+        curr_buy = positions4.get('BuyTrades_4', {})
+        for key, trade in curr_buy.items():
+
+            if trade.get('exit_id') != 0:continue
+            try:
+                stock_name = trade['symbol']
+                token = str(trade['token'])
+                target = trade['tg']
+                stoploss = trade['sl']
+                entry_time = trade['order_time']
+                trade_side = trade['side']
+                end_date = datetime.now().replace(microsecond=0, second=0)
+                his_data = fetch_historical_from_db(stock_name,token, 5)
+                if his_data.empty :
+                    his_data = Candle_Fetcher2(token=token, start_date=end_date - timedelta(days=1), end_date=end_date)
+
+                if his_data.empty:
+                    continue
+
+                df = pd.DataFrame(his_data, columns=['TIME', 'OPEN', 'HIGH', 'LOW', 'CLOSE', 'VOLUME'])
+                df['TIME'] = pd.to_datetime(df['TIME']).dt.tz_localize(None)
+
+                df_5min_BUY = candle_conversion(df, '5min')
+                
+                bb(df_5min_BUY, n=15, k=2)
+                
+                direction, ub, lb = SuperTrend(df_5min_BUY, 5, 3)
+
+                df_5min_BUY['Dir'] = direction
+                df_5min_BUY['SU'] = ub
+                df_5min_BUY['SL'] = lb
+
+                today_date = datetime.now().date()
+                df_5min_BUY= df_5min_BUY[df_5min_BUY['TIME'].dt.date == today_date]
+                if df_5min_BUY.empty:
+                    continue  
+                
+                curr_candel = df_5min_BUY.iloc[-2]
+                
+                logging.info(f" {stock_name} curr candle {curr_candel} ")
+                prev_trail = trade['st_trail']
+                st_trail = prev_trail  # default → keep previous
+                
+                # For BUY trade → SuperTrend down (-1) gives trailing SL
+                if curr_candel['Dir'] == -1:
+                    new_trail = curr_candel['SL']
+                    logging.info(f"new trail ; {new_trail}")
+                    if not np.isnan(prev_trail):
+                        st_trail = min(prev_trail, new_trail)
+                    else :
+                        st_trail = new_trail
+                    positions_collec_new.update_one(
+                        {"_id": ID4},
+                        {"$set": {
+                            f"BuyTrades_4.{key}.st_trail":float(st_trail),
+                            }}
+                    )
+                df_live = his_data[his_data['TIME'] > entry_time]
+                
+                if df_live.empty:
+                    continue
+                
+                last_row = df_live.iloc[-1]
+                logging.info("=======================================================================")
+                logging.info(f" Here in BUY exit n {last_row} ")
+                curr_time = datetime.now().time()
+                exit_reason = None
+                exit_price = 0
+
+                if curr_time >= dt_time(15, 0):
+                    exit_reason = "TIMELAPSE"
+                    exit_price = last_row['CLOSE']
+                
+                elif last_row['LOW'] <= stoploss:
+                    exit_reason = "SL Hit"
+                    exit_price = stoploss
+
+                
+                elif last_row['HIGH'] >= target:
+                    exit_reason = "TARGET"
+                    exit_price = target
+                
+                elif last_row['LOW'] <= st_trail:
+                    exit_reason = "SL Trail"
+                    exit_price = st_trail
+                
+                logging.info(f" {stock_name} ST {st_trail} {curr_candel['TIME']}")
+                
+                if exit_reason:
+                    logging.info(f"EXITING BUY {stock_name}: {exit_reason} @ {exit_price}")
+                    logging.info("=============================================")
+                    logging.info("------------EXIT  FOUNd ----------------------")
+                    logging.info("=============================================")
+                    positions_collec_new.update_one(
+                        {"_id": ID4},
+                        {"$set": {                            
+                            f"BuyTrades_4.{key}.exit_id": str(time.perf_counter_ns()),
+                            f"BuyTrades_4.{key}.exit_price": float(exit_price),
+                            f"BuyTrades_4.{key}.exit_time": datetime.now(),
+                            f"BuyTrades_4.{key}.exit_time_code": last_row['TIME'],
+                            f"BuyTrades_4.{key}.exit_type": exit_reason,
+                        }}
+                    )
+                    time.sleep(2)
+                    today_iso = datetime.today().strftime('%Y-%m-%d')
+                    stocks_collection.update_one(
+                            {'date': str(today_iso), 'company': stock_name},
+                            {'$set': {'Decision2':trade_side,'exit_time2':str(last_row['TIME']),"exit_type2":exit_reason ,'exit_price2':str(exit_price) }}
+                            )
+                    time.sleep(2)
+            except Exception as e:
+                logging.info(f"Error in Buy Exit {trade['symbol']}: {e}")
+
+if __name__ == "__main__":
+    logging.info(
+    "\n\n We are in Strategy 4 .... Starting script at "
+    "Fetching Historical Data Starting Soon ... %s\n",
+    datetime.now()
+)
+
+    pause.until(datetime.now().replace(hour=9,minute=14,second=50))
+    # while True:
+    #     stock_today = todays_stock()
+
+    #     if len(stock_today) == 0:
+    #         logging.info(" No stocks found. Retrying in 30 seconds...")
+    #         time.sleep(30)   # wait before retry
+    #         continue         # try again
+    #     else:
+    #         logging.info(f"Stocks found: {len(stock_today)}")
+    #         break             # exit loop when data comes
+
+    # hist_db (stock_today)
+
+    logging.info(
+    "\n\n We are in Strategy 4 .... Starting script at  ... %s\n",
+    datetime.now()
+)
+
+
+    pause.until(datetime.now().replace(hour=9,minute=30,second=5))
+    client_saurav     = pymongo.MongoClient("mongodb+srv://")
+    db_saurav         = client_saurav["ST4"]
+    db_saurav2 = client_saurav['stock_news_db']
+    stocks_collection = db_saurav2["stocks_list"]
+    dashboard_link = "mongodb:"
+    data_client = pymongo.MongoClient(dashboard_link)
+    trades = data_client['NSE_STOCKS']
+    positions_collec = trades['Positions']
+    positions_collec_new = db_saurav['positions_st4_1']
+    trades_collec_new = db_saurav['trades_st4']
+    PER_TRADE_AMOUNT = 10000
+    positions, ID = fetching_positions()
+
+    if ID is None:
+        tryyy = 3
+        while tryyy > 0:
+            if ID is not None: break
+            positions, ID = start_positions(imgLink=[], buy_st={}, sell_st={})
+            tryyy -= 1
+            time.sleep(5)
+    logging.info(f"Today's positions ID: {ID}")
+
+    dict_stocks_today = {}
+    trade_setup()
+    t1 = threading.Thread(target=trade_signal_cnf)
+    t2 = threading.Thread(target=sell_st4_exit, args=(stocks_collection, dict_stocks_today))
+    t3 = threading.Thread(target=buy_st4_exit, args=(stocks_collection, dict_stocks_today))
+    t1.start()
+    t2.start()
+    t3.start()
+    t1.join()
+    t2.join()
+    t3.join()
+    logging.info("Script Finished.")
